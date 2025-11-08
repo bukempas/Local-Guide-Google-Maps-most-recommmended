@@ -1,0 +1,7 @@
+{
+  "name": "Gemini Maps Local Guide",
+  "description": "An app that recommends the top 10 most recommended and commented places, restaurants, or hotels based on your search and location using Google Maps grounding.",
+  "requestFramePermissions": [
+    "geolocation"
+  ]
+}
