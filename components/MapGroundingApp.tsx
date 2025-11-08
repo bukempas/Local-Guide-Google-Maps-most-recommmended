@@ -1,6 +1,14 @@
+
 import React, { useState, useEffect, useCallback } from 'react';
 import { getPlacesRecommendations } from '../services/geminiService';
-import { UserLocation } from '../types';
+import { UserLocation, PriceRange, CuisineType, Amenity } from '../types';
+
+interface ParsedRecommendation {
+  originalIndex: number;
+  name: string;
+  rating: number | null;
+  fullText: string;
+}
 
 const MapGroundingApp: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState<string>('');
@@ -10,6 +18,23 @@ const MapGroundingApp: React.FC = () => {
   const [locationPermissionGranted, setLocationPermissionGranted] = useState<boolean>(false);
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+
+  // New state for advanced filters
+  const [priceRange, setPriceRange] = useState<PriceRange>('');
+  const [cuisineType, setCuisineType] = useState<CuisineType>('');
+  const [selectedAmenities, setSelectedAmenities] = useState<Amenity[]>([]);
+
+  // New state for sorting
+  const [sortOrder, setSortOrder] = useState<'default' | 'highest-rated' | 'lowest-rated'>('default');
+  const [parsedRecommendations, setParsedRecommendations] = useState<ParsedRecommendation[]>([]);
+
+  const availableCuisines = [
+    'Italian', 'Mexican', 'Indian', 'Chinese', 'Japanese', 'American', 'French',
+    'Thai', 'Mediterranean', 'Vegan', 'Vegetarian', 'Seafood', 'Café', 'Barbecue'
+  ];
+  const availableAmenities: Amenity[] = [
+    'Wi-Fi', 'Outdoor Seating', 'Pet-Friendly', 'Parking', 'Wheelchair Accessible'
+  ];
 
   const requestGeolocation = useCallback(() => {
     if (navigator.geolocation) {
@@ -38,6 +63,59 @@ const MapGroundingApp: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // Run once on mount to get location
 
+  useEffect(() => {
+    // When recommendationsText changes, re-parse and update parsedRecommendations
+    if (recommendationsText) {
+      const items = recommendationsText.split(/\n\s*\d+\.\s+\*\*(.*?)\*\*(.*?)(\d+\.?\d*)\s*(?:stars|score|\/10)?/gs).filter(Boolean); // Split and filter empty strings
+      const newParsed: ParsedRecommendation[] = [];
+      let currentItemIndex = 0;
+
+      // Regex to capture the name and rating (handles "X.X stars", "X/10", "Score: Y")
+      const itemRegex = /^\s*\d+\.\s+\*\*(.*?)\*\*(?:[^\n]*?(\d+\.?\d*)\s*(?:stars|out of 5|score|\/10))?/i;
+
+      recommendationsText.split('\n').forEach((line, lineIndex) => {
+        const match = line.match(itemRegex);
+        if (match) {
+          const name = match[1]?.trim() || `Recommendation ${newParsed.length + 1}`;
+          let rating: number | null = null;
+
+          // Attempt to parse rating from the matched group or the full line
+          if (match[2]) {
+            rating = parseFloat(match[2]);
+          } else {
+            // Fallback for more general rating patterns like "4.5/5"
+            const generalRatingMatch = line.match(/(\d+\.?\d*)\s*(?:stars|out of 5|score|\/10)/i);
+            if (generalRatingMatch && generalRatingMatch[1]) {
+              rating = parseFloat(generalRatingMatch[1]);
+            }
+          }
+
+          newParsed.push({
+            originalIndex: currentItemIndex++,
+            name,
+            rating: rating && rating > 0 && rating <= 10 ? rating : null, // Basic validation for rating range
+            fullText: line.trim(),
+          });
+        } else if (newParsed.length > 0) {
+          // If it's a continuation of the previous item, append to its fullText
+          newParsed[newParsed.length - 1].fullText += '\n' + line.trim();
+        }
+      });
+      setParsedRecommendations(newParsed);
+    } else {
+      setParsedRecommendations([]);
+    }
+  }, [recommendationsText]);
+
+
+  const handleAmenityChange = (amenity: Amenity) => {
+    setSelectedAmenities((prev) =>
+      prev.includes(amenity)
+        ? prev.filter((a) => a !== amenity)
+        : [...prev, amenity]
+    );
+  };
+
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     if (!searchQuery.trim()) {
@@ -53,11 +131,18 @@ const MapGroundingApp: React.FC = () => {
     setError(null);
     setRecommendationsText('');
     setGroundingUrls([]);
+    setParsedRecommendations([]); // Clear parsed recommendations too
 
     const fullPrompt = `Based on my current location, find the top 10 most recommended and commented ${searchQuery}. For each, provide its name, a brief summary of why it's popular, and its general type (e.g., 'Italian Restaurant', 'Boutique Hotel'). Present this as a numbered list.`;
 
     try {
-      const result = await getPlacesRecommendations(fullPrompt, userLocation);
+      const result = await getPlacesRecommendations(
+        fullPrompt,
+        userLocation,
+        priceRange,
+        cuisineType,
+        selectedAmenities
+      );
       setRecommendationsText(result.text);
       setGroundingUrls(result.groundingUrls);
     } catch (err) {
@@ -69,19 +154,98 @@ const MapGroundingApp: React.FC = () => {
   };
 
   const renderRecommendations = () => {
-    if (!recommendationsText) {
+    if (!recommendationsText && !loading) {
       return null;
     }
-    // Simple rendering for plain text, assuming the model gives a readable list.
-    const paragraphs = recommendationsText.split('\n').filter(p => p.trim() !== '');
+
+    let recommendationsToRender = [...parsedRecommendations];
+
+    if (sortOrder === 'highest-rated') {
+      recommendationsToRender.sort((a, b) => {
+        if (a.rating === null && b.rating === null) return 0;
+        if (a.rating === null) return 1; // Nulls last
+        if (b.rating === null) return -1; // Nulls last
+        return b.rating - a.rating; // Highest first
+      });
+    } else if (sortOrder === 'lowest-rated') {
+      recommendationsToRender.sort((a, b) => {
+        if (a.rating === null && b.rating === null) return 0;
+        if (a.rating === null) return 1; // Nulls last
+        if (b.rating === null) return -1; // Nulls last
+        return a.rating - b.rating; // Lowest first
+      });
+    } else {
+      // Default order (original parsing order)
+      recommendationsToRender.sort((a, b) => a.originalIndex - b.originalIndex);
+    }
+
+    // Basic markdown to HTML conversion for strong, emphasis, lists
+    const renderMarkdownContent = (markdown: string) => {
+      const lines = markdown.split('\n');
+      // FIX: Removed explicit JSX.Element[] type annotation; TypeScript can infer this.
+      // This often resolves 'Cannot find namespace JSX' errors when tsconfig setup is implicit or tricky.
+      const elements = [];
+      let inList = false;
+      let isOrdered = false;
+
+      lines.forEach((line, idx) => {
+        const trimmedLine = line.trim();
+        let content = trimmedLine
+          .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+          .replace(/\*(.*?)\*/g, '<em>$1</em>');
+
+        if (trimmedLine.match(/^\d+\.\s/)) { // Ordered list item
+          if (!inList || !isOrdered) {
+            if (inList) elements.push(isOrdered ? <ol key={`list-end-${idx}`} /> : <ul key={`list-end-${idx}`} />);
+            elements.push(<ol key={`list-start-${idx}`} className="list-decimal list-inside space-y-1 text-gray-700" />);
+            inList = true;
+            isOrdered = true;
+          }
+          elements.push(<li key={idx} dangerouslySetInnerHTML={{ __html: content.substring(content.indexOf('.') + 1).trim() }} />);
+        } else if (trimmedLine.match(/^- /)) { // Unordered list item
+          if (!inList || isOrdered) {
+            if (inList) elements.push(isOrdered ? <ol key={`list-end-${idx}`} /> : <ul key={`list-end-${idx}`} />);
+            elements.push(<ul key={`list-start-${idx}`} className="list-disc list-inside space-y-1 text-gray-700" />);
+            inList = true;
+            isOrdered = false;
+          }
+          elements.push(<li key={idx} dangerouslySetInnerHTML={{ __html: content.substring(content.indexOf('-') + 1).trim() }} />);
+        } else {
+          if (inList) { // End current list
+            elements.push(isOrdered ? <ol key={`list-end-${idx}`} /> : <ul key={`list-end-${idx}`} />);
+            inList = false;
+          }
+          if (trimmedLine) {
+            elements.push(<p key={idx} className="mb-2" dangerouslySetInnerHTML={{ __html: content }} />);
+          }
+        }
+      });
+      if (inList) { // Close any open list at the end
+        elements.push(isOrdered ? <ol key={`list-final-end`} /> : <ul key={`list-final-end`} />);
+      }
+      return <>{elements}</>;
+    };
+
+
     return (
       <div className="mt-6 p-4 bg-blue-50 rounded-lg shadow-inner">
         <h3 className="text-xl font-semibold text-blue-800 mb-4">Our Recommendations:</h3>
-        <ul className="list-decimal list-inside space-y-2 text-gray-700">
-          {paragraphs.map((paragraph, index) => (
-            <li key={index} className="leading-relaxed">{paragraph}</li>
-          ))}
-        </ul>
+        {recommendationsToRender.length > 0 ? (
+          <div className="space-y-4">
+            {recommendationsToRender.map((rec, index) => (
+              <div key={rec.originalIndex || index} className="p-3 bg-white border border-blue-200 rounded-md shadow-sm">
+                {renderMarkdownContent(rec.fullText)}
+                {rec.rating !== null && (
+                  <p className="text-sm text-gray-600 mt-2">
+                    <span className="font-semibold">Rating:</span> {rec.rating} {rec.rating <= 5 ? 'stars' : ''}
+                  </p>
+                )}
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="text-gray-500">No recommendations found or could be parsed for sorting.</p>
+        )}
       </div>
     );
   };
@@ -150,6 +314,80 @@ const MapGroundingApp: React.FC = () => {
                 disabled={!locationPermissionGranted || !userLocation || loading}
               />
             </div>
+
+            {/* Advanced Filters */}
+            <div className="mt-6 space-y-4">
+              <h3 className="text-xl font-semibold mb-2">Advanced Filters</h3>
+
+              {/* Price Range */}
+              <div>
+                <label htmlFor="priceRange" className="block text-sm font-medium mb-1">Price Range</label>
+                <select
+                  id="priceRange"
+                  value={priceRange}
+                  onChange={(e) => setPriceRange(e.target.value as PriceRange)}
+                  className="w-full p-2 rounded-md border border-indigo-500 bg-indigo-50 text-gray-900"
+                >
+                  <option value="">Any</option>
+                  <option value="$">Low ($)</option>
+                  <option value="$$">Medium ($$)</option>
+                  <option value="$$$">High ($$$)</option>
+                  <option value="$$$$">Very High ($$$$)</option>
+                </select>
+              </div>
+
+              {/* Cuisine Type */}
+              <div>
+                <label htmlFor="cuisineType" className="block text-sm font-medium mb-1">Cuisine Type</label>
+                <select
+                  id="cuisineType"
+                  value={cuisineType}
+                  onChange={(e) => setCuisineType(e.target.value)}
+                  className="w-full p-2 rounded-md border border-indigo-500 bg-indigo-50 text-gray-900"
+                >
+                  <option value="">Any</option>
+                  {availableCuisines.map((cuisine) => (
+                    <option key={cuisine} value={cuisine}>{cuisine}</option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Amenities */}
+              <div>
+                <span className="block text-sm font-medium mb-1">Amenities</span>
+                <div className="grid grid-cols-2 gap-2">
+                  {availableAmenities.map((amenity) => (
+                    <label key={amenity} className="flex items-center text-sm">
+                      <input
+                        type="checkbox"
+                        checked={selectedAmenities.includes(amenity)}
+                        onChange={() => handleAmenityChange(amenity)}
+                        className="form-checkbox h-4 w-4 text-indigo-600 rounded"
+                      />
+                      <span className="ml-2">{amenity}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+
+              {/* Sort by Rating */}
+              <div className="mt-4">
+                <label htmlFor="sortOrder" className="block text-sm font-medium mb-1">Sort by</label>
+                <select
+                  id="sortOrder"
+                  value={sortOrder}
+                  onChange={(e) => setSortOrder(e.target.value as typeof sortOrder)}
+                  className="w-full p-2 rounded-md border border-indigo-500 bg-indigo-50 text-gray-900"
+                  disabled={parsedRecommendations.length === 0}
+                >
+                  <option value="default">Default Order</option>
+                  <option value="highest-rated">Highest Rated</option>
+                  <option value="lowest-rated">Lowest Rated</option>
+                </select>
+              </div>
+            </div>
+
+
             <button
               type="submit"
               className="w-full flex items-center justify-center px-5 py-3 border border-transparent text-base font-medium rounded-md text-white bg-green-500 hover:bg-green-600 focus:outline-none focus:ring-2 focus:ring-green-400 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed"
